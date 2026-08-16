@@ -18,7 +18,7 @@ services:
       - key: GITHUB_TOKEN
         sync: false
       - key: GITHUB_SANDBOX_REPO
-        sync: false
+        value: a50411278apeter40-svg/codeserver-ai-sandbox
 
       # --- Non-secret defaults ---
       - key: GEMINI_MODEL

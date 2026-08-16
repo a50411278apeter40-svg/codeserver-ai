@@ -138,6 +138,39 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
     #sendBtn:disabled { opacity: 0.5; cursor: default; }
     #ctxHint { font-size: 10px; color: var(--vscode-descriptionForeground, #9d9d9d); }
     .ctx-on { color: var(--accent) !important; font-weight: 600; }
+    .tool-row {
+      align-self: stretch;
+      font-family: var(--vscode-editor-font-family, "SF Mono", Menlo, Consolas, monospace);
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground, #9d9d9d);
+      border-left: 2px solid var(--vscode-focusBorder, #007acc);
+      padding: 4px 8px;
+      margin: 2px 0;
+      background: rgba(0,0,0,0.15);
+      border-radius: 0 4px 4px 0;
+    }
+    .tool-call-pill {
+      display: inline-block;
+      white-space: pre-wrap;
+      word-break: break-all;
+      overflow-wrap: anywhere;
+    }
+    .tool-result details { margin-top: 4px; }
+    .tool-result summary {
+      cursor: pointer; font-size: 11px; outline: none;
+    }
+    .tool-result summary.ok { color: var(--vscode-testing-iconPassed, #73c991); }
+    .tool-result summary.fail { color: var(--vscode-testing-iconFailed, #f48771); }
+    .tool-result pre {
+      margin: 4px 0 0 0; padding: 6px;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow-x: auto; overflow-y: auto;
+      font-size: 11px;
+      white-space: pre-wrap; word-break: break-all;
+      max-height: 300px;
+    }
   </style>
 </head>
 <body>
@@ -173,6 +206,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
         });
       }
+      }
 
       /**
        * Lightweight markdown-ish renderer:
@@ -202,6 +236,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           return '<div>' + escapeHtml(p.text).replace(/\n/g, '<br>') + '</div>';
         }).join('');
       }
+      }
 
       function addBubble(role, content, opts) {
         opts = opts || {};
@@ -223,10 +258,95 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return { wrap: wrap, body: body };
       }
+      }
 
+      /**
+       * Render a ReAct-style tool call as a lightweight row, inserted before
+       * the AI answer bubble so the trace appears as it happens.
+       * Returns the unique DOM id assigned to the row.
+       */
+      function addToolCall(toolCall, insertBeforeEl, counter) {
+        var id = 'tool-call-' + counter;
+        var row = document.createElement('div');
+        row.className = 'tool-row tool-call';
+        row.id = id;
+        var argsStr = (toolCall.args !== undefined && toolCall.args !== null)
+          ? JSON.stringify(toolCall.args)
+          : '{}';
+        var pill = document.createElement('span');
+        pill.className = 'tool-call-pill';
+        pill.textContent = '\u{1F527} ' + (toolCall.name || 'unknown') + '(' + argsStr + ')';
+        row.appendChild(pill);
+        messagesEl.insertBefore(row, insertBeforeEl);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return id;
+      }
+      }
+
+      /**
+       * Render a tool result below its matching tool_call row (identified by
+       * callId). Collapsed by default when output is long.
+       */
+      function addToolResult(toolResult, callId) {
+        var callRow = document.getElementById(callId);
+        if (!callRow) { return; }
+
+        var resultRow = document.createElement('div');
+        resultRow.className = 'tool-row tool-result';
+
+        var details = document.createElement('details');
+
+        var summary = document.createElement('summary');
+        var summaryText = 'Result';
+        var summaryClass = '';
+        if (toolResult && typeof toolResult.exitCode === 'number') {
+          if (toolResult.exitCode === 0) {
+            summaryText = '\u2713 exit 0';
+            summaryClass = 'ok';
+          } else {
+            summaryText = '\u2717 exit ' + toolResult.exitCode;
+            summaryClass = 'fail';
+          }
+        }
+        if (toolResult && toolResult.name) {
+          summaryText = toolResult.name + ' \u00B7 ' + summaryText;
+        }
+        summary.textContent = summaryText;
+        if (summaryClass) { summary.className = summaryClass; }
+
+        var resultVal = (toolResult && toolResult.result !== undefined) ? toolResult.result : toolResult;
+        var resultText;
+        if (typeof resultVal === 'string') {
+          resultText = resultVal;
+        } else {
+          resultText = JSON.stringify(resultVal, null, 2);
+        }
+
+        var MAX = 4000;
+        var truncated = false;
+        if (resultText.length > MAX) {
+          resultText = resultText.slice(0, MAX);
+          truncated = true;
+        }
+
+        var pre = document.createElement('pre');
+        pre.textContent = resultText + (truncated ? '\n... (truncated)' : '');
+
+        details.appendChild(summary);
+        details.appendChild(pre);
+
+        // Collapse by default if output is long.
+        details.open = (resultText.length <= 500);
+
+        resultRow.appendChild(details);
+        callRow.parentNode.insertBefore(resultRow, callRow.nextSibling);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+      }
       function setSending(state) {
         sending = state;
         sendBtn.disabled = state;
+      }
       }
 
       function updateCtxHint(ctx) {
@@ -238,6 +358,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           ctxHint.textContent = 'No active file context';
           ctxHint.className = '';
         }
+      }
       }
 
       async function sendMessage() {
@@ -259,6 +380,8 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
         const aiBubble = addBubble('ai', '', { raw: false });
         aiBubble.body.classList.add('typing');
         let assistantText = '';
+        let toolCallCounter = 0;
+        let pendingToolCalls = [];
 
         try {
           setSending(true);
@@ -304,6 +427,25 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
                     aiBubble.body.classList.remove('typing');
                     aiBubble.wrap.classList.add('error');
                     aiBubble.body.textContent = 'Error: ' + parsed.error + (parsed.detail ? (' — ' + JSON.stringify(parsed.detail).slice(0, 300)) : '');
+                  } else if (parsed && parsed.tool_call) {
+                    var tcId = addToolCall(parsed.tool_call, aiBubble.wrap, toolCallCounter);
+                    toolCallCounter += 1;
+                    pendingToolCalls.push({ id: tcId, name: parsed.tool_call.name });
+                  } else if (parsed && parsed.tool_result) {
+                    var matchIdx = -1;
+                    if (parsed.tool_result.name) {
+                      matchIdx = pendingToolCalls.findIndex(function (p) {
+                        return p.name === parsed.tool_result.name;
+                      });
+                    }
+                    if (matchIdx === -1 && pendingToolCalls.length > 0) {
+                      matchIdx = 0;
+                    }
+                    if (matchIdx >= 0) {
+                      var matched = pendingToolCalls[matchIdx];
+                      pendingToolCalls.splice(matchIdx, 1);
+                      addToolResult(parsed.tool_result, matched.id);
+                    }
                   }
                   // else: unknown control/meta object — ignore silently.
                 }
@@ -321,6 +463,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
         } finally {
           setSending(false);
         }
+      }
       }
 
       /** Ask the extension host for the current active editor context. */
@@ -342,6 +485,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
             resolve(null);
           }, 1500);
         });
+      }
       }
 
       // Receive messages from the extension host.

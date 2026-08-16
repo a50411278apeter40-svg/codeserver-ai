@@ -1,7 +1,8 @@
 # =============================================================================
 # codeserver-ai Dockerfile
 # Single-stage build on top of codercom/code-server (real VS Code in browser)
-# Adds: Node.js 20 backend (Express), preinstalled AI-chat extension.
+# Adds: Node.js 20 backend (Express), preinstalled AI-chat extension,
+#       GitHub CLI (gh) for codespace exec bridge.
 # =============================================================================
 
 FROM codercom/code-server:latest
@@ -22,6 +23,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && node --version && npm --version \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Install GitHub CLI (gh)
+# Needed by the backend's codespace exec bridge (codespaceExec.js) to run
+# shell commands inside live GitHub Codespaces via `gh codespace ssh`.
+# Auth: gh reads the GH_TOKEN env var automatically — no `gh auth login`
+# interactive flow needed. GH_TOKEN is set at runtime from GITHUB_TOKEN
+# (see codespaceExec.js which sets GH_TOKEN from process.env.GITHUB_TOKEN).
+# Official install docs: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+# ---------------------------------------------------------------------------
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && gh --version \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
@@ -60,6 +81,8 @@ RUN chmod +x /app/start.sh
 # ENV GOOGLE_API_KEY=
 ENV GEMINI_MODEL=gemma-4-31b-it
 # ENV GITHUB_TOKEN=
+# GITHUB_TOKEN is used both for GitHub REST API calls AND for gh CLI auth.
+# codespaceExec.js sets GH_TOKEN from GITHUB_TOKEN at runtime.
 # ENV GITHUB_SANDBOX_REPO=owner/repo
 ENV CODESPACE_MACHINE_TYPE=largePremiumLinux
 
@@ -72,4 +95,19 @@ EXPOSE 10000
 
 WORKDIR /app
 
-CMD ["/app/start.sh"]
+# ---------------------------------------------------------------------------
+# IMPORTANT FIX
+# The codercom/code-server base image bakes its own ENTRYPOINT:
+#   ENTRYPOINT ["/usr/bin/entrypoint.sh", "--bind-addr", "0.0.0.0:8080", "."]
+# When only CMD is set (as this file used to do), Docker keeps the base
+# image's ENTRYPOINT and appends our CMD as EXTRA positional args to it —
+# which that entrypoint then forwards straight into `code-server` itself.
+# So "/app/start.sh" was never executed as a script; it was passed to
+# code-server as a stray workspace-path argument, and code-server started
+# with ITS OWN default config (password auth) — exactly the "Welcome to
+# code-server / check the config file for the password" screen users saw.
+# Overriding ENTRYPOINT here fully replaces the base image's entrypoint so
+# our start.sh (which launches code-server with --auth none + our backend)
+# actually runs as the container's real startup command.
+# ---------------------------------------------------------------------------
+ENTRYPOINT ["/app/start.sh"]

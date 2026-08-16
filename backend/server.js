@@ -5,6 +5,10 @@
  * ------------------------------------------------------------------
  * Responsibilities:
  *   1. POST /api/chat          – stream Gemini AI chat (SSE) to the extension webview
+ *      Now implements a ReAct-style tool-using agent loop: the AI can call tools
+ *      (list_files, read_file, write_file, run_command, git, etc.) that execute
+ *      INSIDE the live GitHub Codespace. Tool calls and results are streamed as
+ *      SSE events; the final text answer is streamed as before.
  *   2. POST /api/codespaces     – create a GitHub Codespace on GITHUB_SANDBOX_REPO
  *      GET  /api/codespaces/machines – list available machine types
  *      GET  /api/codespaces          – list codespaces for the repo
@@ -21,6 +25,9 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
+// Tool-using agent: declarations + dispatcher (exec via codespace bridge)
+const { toolDeclarations, dispatchTool } = require('./tools');
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 const CODE_SERVER_TARGET = process.env.CODE_SERVER_TARGET || 'http://127.0.0.1:8080';
@@ -30,12 +37,15 @@ const CODE_SERVER_TARGET = process.env.CODE_SERVER_TARGET || 'http://127.0.0.1:8
 // ---------------------------------------------------------------------------
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemma-4-31b-it';
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GITHUB_ACCESS_TOKEN || '';
 const GITHUB_SANDBOX_REPO = process.env.GITHUB_SANDBOX_REPO || ''; // "owner/repo"
 const CODESPACE_MACHINE_TYPE = process.env.CODESPACE_MACHINE_TYPE || 'largePremiumLinux';
 
 const GITHUB_API = 'https://api.github.com';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+
+// ReAct loop config
+const MAX_TOOL_CALLS = parseInt(process.env.MAX_TOOL_CALLS || '8', 10);
 
 // ---------------------------------------------------------------------------
 // Middleware
@@ -70,9 +80,13 @@ function githubHeaders() {
  * acts as context. Gemini doesn't have a dedicated system message in the
  * basic generateContent call for Gemma models, so we fold context into the
  * first user part.
+ *
+ * @param {Array} messages - [{ role: 'user'|'assistant', content: '...' }, ...]
+ * @param {object} context - optional { activeFile: { name, content } }
+ * @param {boolean} includeTools - if true, add tools (functionDeclarations) to body
+ * @returns {object} Gemini request body
  */
-function buildGeminiBody(messages, context) {
-  // messages: [{ role: 'user'|'assistant', content: '...' }, ...]
+function buildGeminiBody(messages, context, includeTools) {
   // Map "assistant" -> "model" for Gemini.
   const contents = messages.map((m) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
@@ -97,13 +111,22 @@ function buildGeminiBody(messages, context) {
     }
   }
 
-  return {
+  const body = {
     contents,
     generationConfig: {
       temperature: 0.7,
       maxOutputTokens: 8192,
     },
   };
+
+  // Add tool declarations for the ReAct loop when requested.
+  if (includeTools && toolDeclarations.length > 0) {
+    body.tools = [{ functionDeclarations: toolDeclarations }];
+    // AUTO mode: model decides whether to call a tool or respond with text.
+    body.toolConfig = { functionCallingConfig: { mode: 'AUTO' } };
+  }
+
+  return body;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,14 +141,40 @@ app.get('/api/health', (_req, res) => {
     sandbox_repo: GITHUB_SANDBOX_REPO,
     machine_type: CODESPACE_MACHINE_TYPE,
     code_server_target: CODE_SERVER_TARGET,
+    tool_count: toolDeclarations.length,
+    max_tool_calls: MAX_TOOL_CALLS,
   });
 });
 
 // ---------------------------------------------------------------------------
-// Routes: AI chat (Gemini streaming)
+// Routes: AI chat (Gemini streaming + ReAct tool loop)
 // ---------------------------------------------------------------------------
+/**
+ * ReAct loop flow:
+ * 1. Build the initial Gemini request with tool declarations.
+ * 2. Call :generateContent (non-streaming) — simpler for parsing function calls.
+ * 3. Inspect candidates[0].content.parts for functionCall parts (skip thought:true).
+ * 4. If functionCall parts found:
+ *    a. Emit SSE {"tool_call": {name, args}} for each.
+ *    b. Call dispatchTool for each tool.
+ *    c. Emit SSE {"tool_result": {name, result}} for each.
+ *    d. Append the model's functionCall turn + a user functionResponse turn to contents.
+ *    e. Loop back to step 2 (cap at MAX_TOOL_CALLS).
+ * 5. If no functionCall (text only): chunk the text and stream it as SSE
+ *    data: "..." events (same format as before), then emit [DONE].
+ *
+ * DESIGN CHOICE: Using :generateContent (non-streaming) for ALL turns including
+ * the final text answer. This is simpler and more robust than mixing streaming
+ * and non-streaming endpoints. The final text is chunked into small pieces and
+ * emitted as SSE events to simulate streaming. (Gemini's generateContent returns
+ * the full response at once, so true token-by-token streaming isn't available
+ * with this endpoint — but the latency is typically acceptable and the simpler
+ * code is worth the tradeoff. The original pure-streaming path is kept as a
+ * fallback for when tools are not requested.)
+ */
+
 app.post('/api/chat', async (req, res) => {
-  const { messages, context } = req.body || {};
+  const { messages, context, tools: clientWantsTools } = req.body || {};
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array is required' });
@@ -134,15 +183,16 @@ app.post('/api/chat', async (req, res) => {
     return res.status(500).json({ error: 'GEMINI_API_KEY is not configured' });
   }
 
+  // Determine whether to enable the tool-using ReAct loop.
+  // Default: enabled. Client can explicitly disable with tools: false.
+  const useTools = clientWantsTools !== false;
+
   // SSE headers for the extension webview.
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no'); // disable proxy buffering (Render nginx)
   res.flushHeaders();
-
-  const geminiBody = buildGeminiBody(messages, context);
-  const url = `${GEMINI_BASE}/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
 
   const abortController = new AbortController();
   let streamFinished = false;
@@ -154,6 +204,214 @@ app.post('/api/chat', async (req, res) => {
   res.on('close', () => {
     if (!streamFinished) abortController.abort();
   });
+
+  // ---- Helper: write SSE data event ----
+  function sseWrite(obj) {
+    try {
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    } catch (_) { /* connection might be closed */ }
+  }
+
+  // ---- Helper: write SSE text chunk (same format as original: data: "..." ----
+  function sseWriteText(text) {
+    try {
+      res.write(`data: ${JSON.stringify(text)}\n\n`);
+    } catch (_) { /* connection might be closed */ }
+  }
+
+  try {
+    // =====================================================================
+    // PATH 1: Original simple streaming (no tools) — backward compatible
+    // =====================================================================
+    if (!useTools) {
+      await streamSimpleChat(req, res, messages, context, abortController);
+      streamFinished = true;
+      return;
+    }
+
+    // =====================================================================
+    // PATH 2: ReAct tool-using loop
+    // =====================================================================
+
+    // Build the initial body with tool declarations.
+    const geminiBody = buildGeminiBody(messages, context, true);
+
+    // The running contents array — we append function calls + responses as we go.
+    // buildGeminiBody already created contents from messages + context.
+    let contents = geminiBody.contents;
+
+    // Per-session state for tool dispatch (caches codespace name).
+    const sessionState = {};
+
+    // The generateContent endpoint (non-streaming) for the tool loop.
+    const generateUrl = `${GEMINI_BASE}/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${GEMINI_API_KEY}`;
+
+    let toolCallCount = 0;
+
+    // ---- ReAct loop ----
+    for (let iteration = 0; iteration < MAX_TOOL_CALLS + 1; iteration++) {
+      // Build the request body for this turn.
+      const requestBody = {
+        contents,
+        generationConfig: geminiBody.generationConfig,
+        tools: geminiBody.tools,
+        toolConfig: geminiBody.toolConfig,
+      };
+
+      const upstream = await fetch(generateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+        signal: abortController.signal,
+      });
+
+      if (!upstream.ok) {
+        const errText = await upstream.text();
+        sseWrite({ error: 'Gemini API error', status: upstream.status, detail: errText });
+        streamFinished = true;
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      const responseJson = await upstream.json();
+
+      // Extract the first candidate's parts.
+      const candidates = responseJson.candidates || [];
+      if (candidates.length === 0) {
+        sseWrite({ error: 'Gemini returned no candidates' });
+        streamFinished = true;
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      const candidate = candidates[0];
+      const parts = (candidate.content && candidate.content.parts) || [];
+
+      // Separate functionCall parts from text parts (skip thought:true parts).
+      const functionCalls = [];
+      const textParts = [];
+      for (const part of parts) {
+        // Skip internal "thinking" parts (Gemma 4 thinking mode).
+        if (part.thought) continue;
+
+        if (part.functionCall) {
+          functionCalls.push(part.functionCall);
+        } else if (part.text) {
+          textParts.push(part.text);
+        }
+      }
+
+      // ---- Case A: No function calls → final text answer ----
+      if (functionCalls.length === 0) {
+        // Stream the final text in chunks (same format as original: data: "...")
+        for (const text of textParts) {
+          // Chunk into ~80 char pieces for a streaming feel.
+          for (let i = 0; i < text.length; i += 80) {
+            sseWriteText(text.slice(i, i + 80));
+          }
+        }
+        streamFinished = true;
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      // ---- Case B: Function calls present → execute tools, loop ----
+
+      // Append the model's functionCall turn to contents (as-is, with functionCall parts).
+      // We need to preserve the exact parts (including thought:true parts for context,
+      // but we only keep functionCall + non-thought text parts for cleanliness).
+      // Actually, Gemini requires the model turn to match what it returned.
+      // We'll include all non-thought parts from the response.
+      const modelParts = parts.filter((p) => !p.thought);
+      contents.push({
+        role: 'model',
+        parts: modelParts,
+      });
+
+      // Process each function call, build the functionResponse turn.
+      const responseParts = [];
+      for (const fc of functionCalls) {
+        toolCallCount++;
+
+        // Check loop cap
+        if (toolCallCount > MAX_TOOL_CALLS) {
+          sseWrite({
+            error: 'Max tool calls reached',
+            max: MAX_TOOL_CALLS,
+            message: `The agent loop reached the maximum of ${MAX_TOOL_CALLS} tool calls. Stopping to avoid runaway loops.`,
+          });
+          streamFinished = true;
+          res.write('data: [DONE]\n\n');
+          res.end();
+          return;
+        }
+
+        const toolName = fc.name;
+        const toolArgs = fc.args || {};
+        const callId = fc.id; // Gemini includes an id field (e.g. "call_597169")
+
+        // Emit tool_call SSE event so the UI can show progress.
+        sseWrite({ tool_call: { name: toolName, args: toolArgs } });
+
+        // Execute the tool.
+        const result = await dispatchTool(toolName, toolArgs, sessionState);
+
+        // Emit tool_result SSE event (truncate huge results for the UI).
+        const resultStr = JSON.stringify(result);
+        const truncatedResult = resultStr.length > 10000
+          ? { ...result, _truncated: true, _note: 'result truncated for UI display' }
+          : result;
+        sseWrite({ tool_result: { name: toolName, result: truncatedResult } });
+
+        // Build the functionResponse part for Gemini.
+        // The id field must match the functionCall's id.
+        const fr = {
+          name: toolName,
+          response: { result },
+        };
+        if (callId) fr.id = callId;
+        responseParts.push({ functionResponse: fr });
+      }
+
+      // Append the user turn with all functionResponses.
+      contents.push({
+        role: 'user',
+        parts: responseParts,
+      });
+
+      // Loop back to the next generateContent call.
+    }
+
+    // ---- Loop cap hit (fell through the for loop) ----
+    sseWrite({
+      error: 'Max tool calls reached',
+      max: MAX_TOOL_CALLS,
+      message: `The agent loop reached the maximum of ${MAX_TOOL_CALLS} tool calls without producing a final text answer.`,
+    });
+    streamFinished = true;
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (err) {
+    streamFinished = true;
+    console.error('Chat ReAct loop error:', err);
+    try {
+      sseWrite({ error: 'Streaming failed', detail: err.message });
+    } catch (_) { /* ignore */ }
+    res.end();
+  }
+});
+
+/**
+ * Original simple streaming chat (no tools) — backward compatible.
+ * Streams from Gemini's :streamGenerateContent SSE endpoint and re-emits
+ * text chunks as data: "..." events.
+ */
+async function streamSimpleChat(_req, res, messages, context, abortController, _streamFinished) {
+  const geminiBody = buildGeminiBody(messages, context, false);
+  const url = `${GEMINI_BASE}/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
 
   try {
     const upstream = await fetch(url, {
@@ -231,11 +489,9 @@ app.post('/api/chat', async (req, res) => {
     }
 
     // Signal stream completion to the client.
-    streamFinished = true;
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err) {
-    streamFinished = true;
     console.error('Chat streaming error:', err);
     // If headers already sent we can only write SSE.
     try {
@@ -245,7 +501,7 @@ app.post('/api/chat', async (req, res) => {
     }
     res.end();
   }
-});
+}
 
 // ---------------------------------------------------------------------------
 // Routes: GitHub Codespaces management
@@ -392,6 +648,7 @@ const server = app.listen(PORT, () => {
   console.log(`  Proxying non-API requests to ${CODE_SERVER_TARGET}`);
   console.log(`  Gemini model: ${GEMINI_MODEL} (key ${GEMINI_API_KEY ? 'set' : 'MISSING'})`);
   console.log(`  GitHub sandbox repo: ${GITHUB_SANDBOX_REPO || '(not set)'}  machine: ${CODESPACE_MACHINE_TYPE}`);
+  console.log(`  Tools: ${toolDeclarations.length} declarations, max ${MAX_TOOL_CALLS} tool calls per turn`);
 });
 
 // Explicitly attach the proxy's upgrade handler so WebSocket upgrades reach code-server.

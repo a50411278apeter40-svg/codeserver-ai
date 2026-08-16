@@ -74,7 +74,7 @@ In the Render dashboard (or in `.env` for local dev), set:
 | `GEMINI_API_KEY` | ✅ | `AIza...` |
 | `GITHUB_TOKEN` | ✅ | `ghp_...` |
 | `GITHUB_SANDBOX_REPO` | ✅ | `youruser/sandbox-template` |
-| `GEMINI_MODEL` | optional | `gemma-3-27b-it` (default) |
+| `GEMINI_MODEL` | optional | `gemma-4-31b-it` (default) |
 | `CODESPACE_MACHINE_TYPE` | optional | `largePremiumLinux` (default) |
 
 ### 5. Deploy via Render Blueprint
