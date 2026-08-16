@@ -20,12 +20,22 @@ set -e
 
 echo "[start.sh] Launching code-server on 0.0.0.0:8080 (background) …"
 
-# code-server runs with --auth none so the Node backend is the single entry point.
-code-server \
-  --bind-addr 0.0.0.0:8080 \
-  --auth none \
-  /home/coder/project \
-  > /tmp/code-server.log 2>&1 &
+# IMPORTANT: code-server auto-detects the platform's $PORT env var (Render
+# injects PORT=10000) and binds to THAT instead of our explicit --bind-addr
+# flag, completely ignoring --bind-addr. That caused code-server to grab
+# port 10000 for itself, so the Node backend then crashed on startup with
+# EADDRINUSE (both trying to bind :10000), crash-looping the whole container.
+# Fix: unset PORT only inside the subshell that launches code-server, so it
+# can't see it and falls back to --bind-addr 0.0.0.0:8080. The outer shell
+# (and the `exec node backend/server.js` below) keeps PORT intact for the
+# Node backend, which is the process that should own $PORT.
+(
+  unset PORT
+  exec code-server \
+    --bind-addr 0.0.0.0:8080 \
+    --auth none \
+    /home/coder/project
+) > /tmp/code-server.log 2>&1 &
 
 CODE_SERVER_PID=$!
 echo "[start.sh] code-server PID: ${CODE_SERVER_PID} (logs: /tmp/code-server.log)"
