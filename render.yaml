@@ -24,4 +24,4 @@ services:
       - key: GEMINI_MODEL
         value: gemma-4-31b-it
       - key: CODESPACE_MACHINE_TYPE
-        value: largePremiumLinux
+        value: standardLinux32gb

@@ -107,7 +107,7 @@ ENV GEMINI_MODEL=gemma-4-31b-it
 # GITHUB_TOKEN is used both for GitHub REST API calls AND for gh CLI auth.
 # codespaceExec.js / start.sh set GH_TOKEN from GITHUB_TOKEN at runtime.
 # ENV GITHUB_SANDBOX_REPO=owner/repo
-ENV CODESPACE_MACHINE_TYPE=largePremiumLinux
+ENV CODESPACE_MACHINE_TYPE=standardLinux32gb
 
 # The Node backend listens on PORT (Render injects PORT). Render maps its
 # external traffic to this port. code-server runs internally on 8080 and is
