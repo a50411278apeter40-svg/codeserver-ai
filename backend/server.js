@@ -665,16 +665,15 @@ const server = app.listen(PORT, () => {
   console.log(`  Tools: ${toolDeclarations.length} declarations, max ${MAX_TOOL_CALLS} tool calls per turn`);
 });
 
-// Explicitly attach the proxy's upgrade handler so WebSocket upgrades reach code-server.
-// createProxyMiddleware with ws:true listens to the 'upgrade' event on the
-// server automatically, but we also wire it manually as a safety net.
-server.on('upgrade', (req, socket, head) => {
-  if (codeServerProxy.upgrade) {
-    codeServerProxy.upgrade(req, socket, head);
-  } else {
-    socket.destroy();
-  }
-});
+// NOTE: do NOT also manually wire `server.on('upgrade', ...)` here.
+// http-proxy-middleware v3 with `ws: true` already subscribes to the
+// underlying HTTP server's 'upgrade' event itself (lazily, the first time a
+// request flows through the middleware). Adding a second manual listener
+// caused BOTH the automatic and manual handler to call
+// `codeServerProxy.upgrade()` on the same socket — i.e. the WebSocket got
+// proxied twice onto one TCP connection, corrupting the stream and causing
+// the editor's WebSocket to abruptly disconnect (seen as
+// "WebSocket close with status code 1006" in the VS Code UI). Removed.
 
 // Graceful shutdown
 process.on('SIGTERM', () => {

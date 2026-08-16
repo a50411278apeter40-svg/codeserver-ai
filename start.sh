@@ -18,6 +18,14 @@ set -e
 #      code-server catches up, without ever blocking startup.
 # =============================================================================
 
+# Raise the file-descriptor limit. VS Code's file watcher (fs.watch) opens
+# one watch handle per directory it tracks, and the default container limit
+# (often 1024 or lower on Render) gets exhausted fast, which is why the logs
+# were full of "EMFILE: too many open files" warnings. Best-effort — some
+# sandboxes cap how high this can go, hence `|| true`.
+ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
+echo "[start.sh] File descriptor limit: $(ulimit -n)"
+
 echo "[start.sh] Launching code-server on 0.0.0.0:8080 (background) …"
 
 # IMPORTANT: code-server auto-detects the platform's $PORT env var (Render
