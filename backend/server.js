@@ -635,7 +635,19 @@ function safeJson(str) {
 // ambiguity about how/when the upgrade gets wired up.
 const codeServerProxy = httpProxy.createProxyServer({
   target: CODE_SERVER_TARGET,
-  changeOrigin: true,
+  // IMPORTANT: changeOrigin must be FALSE here. With changeOrigin:true, the
+  // outgoing `Host` header gets rewritten to the proxy target (127.0.0.1:8080),
+  // while the browser's `Origin` header (sent as-is, e.g.
+  // "https://vscodeai.onrender.com") is left untouched. code-server checks
+  // Origin against Host on WebSocket upgrades as an anti cross-site-
+  // WebSocket-hijacking measure — with changeOrigin:true those two no longer
+  // matched, so code-server rejected EVERY real browser WS handshake with a
+  // 403 (confirmed by direct testing: identical requests without an Origin
+  // header succeeded; adding a same-origin Origin header alone produced a
+  // 403 with no Express/app headers, meaning code-server itself rejected it
+  // before our app ever saw it). Keeping the original Host header (i.e. not
+  // rewriting it) makes Host and Origin agree again, so the check passes.
+  changeOrigin: false,
   ws: true,
   // code-server's management/extension-host connections are long-lived with
   // idle gaps between app-level pings — don't let a proxy-side timeout kill them.
