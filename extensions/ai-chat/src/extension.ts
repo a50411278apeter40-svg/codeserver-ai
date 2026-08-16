@@ -206,7 +206,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
         });
       }
-      }
 
       /**
        * Lightweight markdown-ish renderer:
@@ -236,7 +235,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           return '<div>' + escapeHtml(p.text).replace(/\n/g, '<br>') + '</div>';
         }).join('');
       }
-      }
 
       function addBubble(role, content, opts) {
         opts = opts || {};
@@ -257,7 +255,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
         messagesEl.appendChild(wrap);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return { wrap: wrap, body: body };
-      }
       }
 
       /**
@@ -280,7 +277,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
         messagesEl.insertBefore(row, insertBeforeEl);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return id;
-      }
       }
 
       /**
@@ -342,11 +338,9 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
         callRow.parentNode.insertBefore(resultRow, callRow.nextSibling);
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
-      }
       function setSending(state) {
         sending = state;
         sendBtn.disabled = state;
-      }
       }
 
       function updateCtxHint(ctx) {
@@ -358,7 +352,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           ctxHint.textContent = 'No active file context';
           ctxHint.className = '';
         }
-      }
       }
 
       async function sendMessage() {
@@ -464,7 +457,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
           setSending(false);
         }
       }
-      }
 
       /** Ask the extension host for the current active editor context. */
       function requestContext() {
@@ -485,7 +477,6 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
             resolve(null);
           }, 1500);
         });
-      }
       }
 
       // Receive messages from the extension host.
