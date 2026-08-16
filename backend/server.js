@@ -509,6 +509,33 @@ async function streamSimpleChat(_req, res, messages, context, abortController, _
 // ---------------------------------------------------------------------------
 
 // List available machine types for the configured repo
+
+// ---------------------------------------------------------------------------
+// TEMPORARY DEBUG ROUTE — reads the container's startup logs so we can
+// diagnose the codespace SSH/SSHFS wiring in start.sh without needing a
+// separate way to shell into the Render container. Safe to remove once the
+// codespace wiring is confirmed working. No auth — this is a throwaway
+// sandbox diagnostics endpoint.
+// ---------------------------------------------------------------------------
+const fs = require('fs');
+app.get('/api/debug/logs', (_req, res) => {
+  function tail(path, maxLen) {
+    try {
+      const content = fs.readFileSync(path, 'utf8');
+      return content.length > maxLen ? content.slice(content.length - maxLen) : content;
+    } catch (e) {
+      return `<could not read ${path}: ${e.message}>`;
+    }
+  }
+  res.type('text/plain').send(
+    '=== /tmp/code-server.log (tail) ===\n' + tail('/tmp/code-server.log', 20000) +
+    '\n\n=== /tmp/gh_ssh_config.log ===\n' + tail('/tmp/gh_ssh_config.log', 5000) +
+    '\n\n=== /tmp/sshfs.log ===\n' + tail('/tmp/sshfs.log', 5000) +
+    '\n\n=== /root/.ssh/config ===\n' + tail('/root/.ssh/config', 5000) +
+    '\n\n=== /root/.local/share/code-server/User/settings.json ===\n' + tail('/root/.local/share/code-server/User/settings.json', 3000)
+  );
+});
+
 app.get('/api/codespaces/machines', async (_req, res) => {
   if (!GITHUB_TOKEN) return res.status(500).json({ error: 'GITHUB_TOKEN is not configured' });
   if (!GITHUB_SANDBOX_REPO) return res.status(500).json({ error: 'GITHUB_SANDBOX_REPO is not configured' });
