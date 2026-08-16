@@ -23,7 +23,7 @@
  */
 
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const httpProxy = require('http-proxy');
 
 // Tool-using agent: declarations + dispatcher (exec via codespace bridge)
 const { toolDeclarations, dispatchTool } = require('./tools');
@@ -623,36 +623,48 @@ function safeJson(str) {
 // ---------------------------------------------------------------------------
 // Catch-all reverse proxy -> code-server (127.0.0.1:8080)
 // ---------------------------------------------------------------------------
-// NOTE: http-proxy-middleware v3 moved all event handlers under the `on`
-// key (onError/onProxyReq/etc. from v2 are silently ignored in v3, which is
-// why proxy failures used to fall through to the library's generic default
-// "Error occurred while trying to proxy: <url>" text instead of our handler).
-const codeServerProxy = createProxyMiddleware({
+// Switched from http-proxy-middleware to the lower-level `http-proxy` library
+// directly. http-proxy-middleware wraps this engine with Express-specific
+// heuristics (auto-detecting the underlying HTTP server to lazily subscribe
+// to 'upgrade' on, etc.) that proved unreliable here: the VS Code Management
+// WebSocket connection was failing almost immediately (within ~0.5-2s, per
+// client logs: "WebSocket close with status code 1006") on every attempt,
+// never even reaching a stable state. Driving `http-proxy` directly with
+// exactly ONE explicit 'upgrade' listener on the raw `server` is the
+// standard, well-tested pattern for proxying code-server and removes all
+// ambiguity about how/when the upgrade gets wired up.
+const codeServerProxy = httpProxy.createProxyServer({
   target: CODE_SERVER_TARGET,
   changeOrigin: true,
-  ws: true, // WebSocket support — critical for code-server terminal/editor sync
-  logLevel: 'warn',
-  on: {
-    error: (err, req, res) => {
-      console.error('Proxy error (code-server unreachable):', err.message);
-      if (res && typeof res.writeHead === 'function' && !res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(
-          '<html><body style="font-family:sans-serif;padding:2rem">' +
-          '<h2>code-server is still starting…</h2>' +
-          '<p>The editor backend isn\'t reachable yet. This is normal right after a ' +
-          'cold start/deploy — refresh in a few seconds.</p>' +
-          '<pre>' + String(err && err.message).replace(/</g, '&lt;') + '</pre>' +
-          '</body></html>'
-        );
-      }
-    },
-  },
+  ws: true,
+  // code-server's management/extension-host connections are long-lived with
+  // idle gaps between app-level pings — don't let a proxy-side timeout kill them.
+  proxyTimeout: 0,
+  timeout: 0,
 });
 
-// Attach proxy for all non-API paths.
-// (API routes above are registered first, so they take precedence.)
-app.use('/', codeServerProxy);
+codeServerProxy.on('error', (err, req, res) => {
+  console.error('Proxy error (code-server unreachable):', err.message);
+  if (res && typeof res.writeHead === 'function' && !res.headersSent) {
+    res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(
+      '<html><body style="font-family:sans-serif;padding:2rem">' +
+      '<h2>code-server is still starting…</h2>' +
+      '<p>The editor backend isn\'t reachable yet. This is normal right after a ' +
+      'cold start/deploy — refresh in a few seconds.</p>' +
+      '<pre>' + String(err && err.message).replace(/</g, '&lt;') + '</pre>' +
+      '</body></html>'
+    );
+  } else if (res && typeof res.destroy === 'function') {
+    // `res` is actually a raw socket here for WS upgrade errors.
+    res.destroy();
+  }
+});
+
+// Plain HTTP requests for anything not matched by our /api routes above.
+app.use('/', (req, res) => {
+  codeServerProxy.web(req, res);
+});
 
 // ---------------------------------------------------------------------------
 // Start
@@ -665,15 +677,17 @@ const server = app.listen(PORT, () => {
   console.log(`  Tools: ${toolDeclarations.length} declarations, max ${MAX_TOOL_CALLS} tool calls per turn`);
 });
 
-// NOTE: do NOT also manually wire `server.on('upgrade', ...)` here.
-// http-proxy-middleware v3 with `ws: true` already subscribes to the
-// underlying HTTP server's 'upgrade' event itself (lazily, the first time a
-// request flows through the middleware). Adding a second manual listener
-// caused BOTH the automatic and manual handler to call
-// `codeServerProxy.upgrade()` on the same socket — i.e. the WebSocket got
-// proxied twice onto one TCP connection, corrupting the stream and causing
-// the editor's WebSocket to abruptly disconnect (seen as
-// "WebSocket close with status code 1006" in the VS Code UI). Removed.
+// Node's default server-wide socket idle timeout is 2 minutes. VS Code's
+// long-lived management/extension-host WebSocket connections sit idle
+// between pings — disable Node's blanket timeout so it never cuts them.
+server.timeout = 0;
+server.keepAliveTimeout = 0;
+
+// Exactly ONE explicit 'upgrade' listener — forwards WebSocket upgrades
+// (terminal, editor sync, extension host, etc.) to code-server.
+server.on('upgrade', (req, socket, head) => {
+  codeServerProxy.ws(req, socket, head);
+});
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
