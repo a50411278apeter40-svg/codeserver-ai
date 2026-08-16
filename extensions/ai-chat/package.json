@@ -7,7 +7,11 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other", "Machine Learning", "Programming Languages"],
+  "categories": [
+    "Other",
+    "Machine Learning",
+    "Programming Languages"
+  ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:aiChatView"
@@ -62,5 +66,11 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.24.0",
     "typescript": "^5.3.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
   }
 }
