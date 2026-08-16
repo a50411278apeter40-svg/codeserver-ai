@@ -60,12 +60,17 @@ RUN mkdir -p /etc/apt/keyrings \
 #   - sshfs: attempts to live-mount the codespace's /workspaces/<repo>
 #     directory over the local project folder, so file Explorer/editing hit
 #     the real remote files. This needs /dev/fuse at runtime — if the host
-#     platform doesn't grant FUSE access, start.sh detects that and falls
-#     back to the local folder without failing the deploy (terminal wiring
-#     still applies either way).
+#     platform doesn't grant FUSE access (true on Render), start.sh falls
+#     back to a background rsync-over-ssh sync loop (see rsync below)
+#     instead, without failing the deploy (terminal wiring still applies
+#     either way).
+#   - rsync: fallback filesystem sync when FUSE isn't available. `rsync -e
+#     ssh` spawns the real ssh binary, which (unlike a pure-JS SFTP client)
+#     correctly honors our ~/.ssh/config's ProxyCommand — the only way to
+#     actually reach a codespace over GitHub's relayed tunnel.
 # ---------------------------------------------------------------------------
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends sshfs openssh-client \
+    && apt-get install -y --no-install-recommends sshfs openssh-client rsync \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------

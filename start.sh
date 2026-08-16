@@ -90,22 +90,51 @@ SETTINGSEOF
         echo "[start.sh] Integrated terminal wired to SSH into ${CS_HOST} (${REMOTE_PATH})."
 
         # --- Filesystem integration ------------------------------------------
-        # Best-effort live SSHFS mount of the codespace's workspace dir over
-        # the local project folder, so Explorer/editing hit the real remote
-        # files. Requires /dev/fuse — many container platforms don't grant
-        # FUSE to regular (non-privileged) containers, so this is guarded and
-        # falls back cleanly to the local empty folder if unavailable.
+        # Try a real live SSHFS mount first (requires /dev/fuse — most PaaS
+        # containers, including Render, don't grant FUSE to regular
+        # non-privileged containers, so this is expected to fail there, but
+        # costs nothing to attempt in case the platform ever does allow it).
+        SSHFS_MOUNTED=0
         if command -v sshfs >/dev/null 2>&1 && [ -e /dev/fuse ]; then
           echo "[start.sh] /dev/fuse present — attempting SSHFS mount of ${CS_HOST}:${REMOTE_PATH} onto ${WORKSPACE_FOLDER} …"
           if sshfs "${CS_HOST}:${REMOTE_PATH}" "$WORKSPACE_FOLDER" \
                -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,StrictHostKeyChecking=no,allow_other,default_permissions \
                2>/tmp/sshfs.log; then
             echo "[start.sh] SSHFS mount succeeded — Explorer/editor now show the LIVE codespace filesystem at ${WORKSPACE_FOLDER}."
+            SSHFS_MOUNTED=1
           else
-            echo "[start.sh] SSHFS mount FAILED (see /tmp/sshfs.log) — falling back to the local empty folder. Terminal is still wired to the codespace."
+            echo "[start.sh] SSHFS mount FAILED (see /tmp/sshfs.log) — falling back to rsync-based sync."
           fi
         else
-          echo "[start.sh] sshfs binary or /dev/fuse not available in this container — filesystem stays local. Terminal is still wired to the codespace."
+          echo "[start.sh] sshfs binary or /dev/fuse not available in this container — falling back to rsync-based sync."
+        fi
+
+        # --- Fallback: periodic bidirectional rsync-over-ssh --------------
+        # No FUSE means no true live mount, so instead keep the local
+        # project folder (what Explorer shows) in lockstep with the
+        # codespace's real files via a background loop: pull remote changes
+        # in, push local changes out, every few seconds. `rsync -e ssh`
+        # spawns the REAL system ssh binary, which (unlike a pure-JS SFTP
+        # client) correctly honors our ~/.ssh/config's ProxyCommand — the
+        # only way to actually reach a codespace, since it has no direct
+        # SSH endpoint, only GitHub's relayed tunnel that `gh` manages.
+        # `--update` skips overwriting a file with an older one on either
+        # side, which keeps this reasonably safe for the common case of only
+        # one side (user in the editor, or the AI on the codespace) editing
+        # at a time. Not instant, but Explorer reflects reality within a
+        # few seconds either way.
+        if [ "$SSHFS_MOUNTED" -eq 0 ] && command -v rsync >/dev/null 2>&1; then
+          echo "[start.sh] Starting background rsync sync loop (~5s interval) between ${WORKSPACE_FOLDER} and ${CS_HOST}:${REMOTE_PATH} …"
+          # Initial pull so Explorer isn't empty on first load.
+          rsync -az --update -e "ssh -F /root/.ssh/config -o StrictHostKeyChecking=no"             "${CS_HOST}:${REMOTE_PATH}/" "$WORKSPACE_FOLDER/" >/tmp/rsync.log 2>&1 || true
+          (
+            while true; do
+              rsync -az --update -e "ssh -F /root/.ssh/config -o StrictHostKeyChecking=no"                 "${CS_HOST}:${REMOTE_PATH}/" "$WORKSPACE_FOLDER/" >>/tmp/rsync.log 2>&1
+              rsync -az --update -e "ssh -F /root/.ssh/config -o StrictHostKeyChecking=no"                 --exclude='.git/'                 "$WORKSPACE_FOLDER/" "${CS_HOST}:${REMOTE_PATH}/" >>/tmp/rsync.log 2>&1
+              sleep 5
+            done
+          ) &
+          echo "[start.sh] rsync sync loop PID: $! (log: /tmp/rsync.log)"
         fi
       else
         echo "[start.sh] 'gh codespace ssh --config' produced no output (see /tmp/gh_ssh_config.log) — skipping terminal/filesystem wiring."
