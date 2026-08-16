@@ -135,6 +135,7 @@ function buildGeminiBody(messages, context, includeTools) {
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
+    build: process.env.RENDER_GIT_COMMIT || 'unknown',
     gemini_model: GEMINI_MODEL,
     gemini_configured: !!GEMINI_API_KEY,
     github_configured: !!GITHUB_TOKEN,

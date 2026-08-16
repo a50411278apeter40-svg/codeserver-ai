@@ -2,7 +2,9 @@
 # codeserver-ai Dockerfile
 # Single-stage build on top of codercom/code-server (real VS Code in browser)
 # Adds: Node.js 20 backend (Express), preinstalled AI-chat extension,
-#       GitHub CLI (gh) for codespace exec bridge.
+#       GitHub CLI (gh) + sshfs/openssh-client for codespace exec bridge
+#       AND for wiring the editor itself (terminal + filesystem) to the
+#       live GitHub Codespace — see start.sh.
 # =============================================================================
 
 FROM codercom/code-server:latest
@@ -23,15 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && node --version && npm --version \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # Install GitHub CLI (gh)
 # Needed by the backend's codespace exec bridge (codespaceExec.js) to run
-# shell commands inside live GitHub Codespaces via `gh codespace ssh`.
+# shell commands inside live GitHub Codespaces via `gh codespace ssh`, AND
+# by start.sh at boot to resolve/create the codespace and generate its SSH
+# config (`gh codespace ssh --config`).
 # Auth: gh reads the GH_TOKEN env var automatically — no `gh auth login`
-# interactive flow needed. GH_TOKEN is set at runtime from GITHUB_TOKEN
-# (see codespaceExec.js which sets GH_TOKEN from process.env.GITHUB_TOKEN).
+# interactive flow needed. GH_TOKEN is set at runtime from GITHUB_TOKEN.
 # Official install docs: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
 # ---------------------------------------------------------------------------
 RUN mkdir -p /etc/apt/keyrings \
@@ -43,7 +46,27 @@ RUN mkdir -p /etc/apt/keyrings \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && gh --version \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Install sshfs + openssh-client
+# Used at startup (start.sh) to make the EDITOR ITSELF (Explorer + integrated
+# terminal) operate directly against the live GitHub Codespace, not this
+# Render container:
+#   - openssh-client: the integrated terminal's default profile shells out
+#     to `ssh <codespace-host>`, using the SSH config `gh codespace ssh
+#     --config` generates, so opening a terminal in the editor drops you
+#     straight into the codespace's real shell.
+#   - sshfs: attempts to live-mount the codespace's /workspaces/<repo>
+#     directory over the local project folder, so file Explorer/editing hit
+#     the real remote files. This needs /dev/fuse at runtime — if the host
+#     platform doesn't grant FUSE access, start.sh detects that and falls
+#     back to the local folder without failing the deploy (terminal wiring
+#     still applies either way).
+# ---------------------------------------------------------------------------
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends sshfs openssh-client \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # Create a workspace folder for code-server to open
@@ -82,7 +105,7 @@ RUN chmod +x /app/start.sh
 ENV GEMINI_MODEL=gemma-4-31b-it
 # ENV GITHUB_TOKEN=
 # GITHUB_TOKEN is used both for GitHub REST API calls AND for gh CLI auth.
-# codespaceExec.js sets GH_TOKEN from GITHUB_TOKEN at runtime.
+# codespaceExec.js / start.sh set GH_TOKEN from GITHUB_TOKEN at runtime.
 # ENV GITHUB_SANDBOX_REPO=owner/repo
 ENV CODESPACE_MACHINE_TYPE=largePremiumLinux
 

@@ -203,6 +203,12 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
   <script nonce="${nonce}">
     (function () {
       const vscodeApi = acquireVsCodeApi();
+      // Diagnostic marker: proves the inline script actually executed
+      // (vs. being silently blocked by CSP). Safe to remove later.
+      try {
+        var __sub = document.querySelector('.subtitle');
+        if (__sub) { __sub.textContent += ' \u2713 JS running'; }
+      } catch (e) {}
       const messagesEl = document.getElementById('messages');
       const inputEl = document.getElementById('input');
       const sendBtn = document.getElementById('sendBtn');
