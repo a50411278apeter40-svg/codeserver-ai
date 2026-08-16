@@ -18,11 +18,31 @@ code-server \
   /home/coder/project &
 
 CODE_SERVER_PID=$!
-
-# Give code-server a moment to bind before the backend starts proxying.
-sleep 2
-
 echo "[start.sh] code-server PID: ${CODE_SERVER_PID}"
+
+# Wait for code-server to actually be reachable before starting the backend
+# proxy in front of it, instead of guessing a fixed sleep. code-server can
+# take anywhere from a couple seconds to (rarely) 30+s to bind on a cold
+# start / first boot (extension install, config init, etc.).
+echo "[start.sh] Waiting for code-server to become reachable on :8080 …"
+READY=0
+for i in $(seq 1 60); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:8080/healthz" 2>/dev/null      || curl -fsS -o /dev/null "http://127.0.0.1:8080/" 2>/dev/null; then
+    READY=1
+    echo "[start.sh] code-server is up (after ${i}s)."
+    break
+  fi
+  # Bail out early (with a clear log) if code-server's process already died.
+  if ! kill -0 "${CODE_SERVER_PID}" 2>/dev/null; then
+    echo "[start.sh] ERROR: code-server process exited before becoming ready. Check logs above."
+    break
+  fi
+  sleep 1
+done
+if [ "${READY}" -ne 1 ]; then
+  echo "[start.sh] WARNING: code-server did not respond within 60s — starting the backend anyway; it will show a 502 from the proxy until code-server catches up. Check the logs above for a code-server crash."
+fi
+
 echo "[start.sh] Starting Node backend on :${PORT:-10000} …"
 
 # Run the backend in the foreground (main process).

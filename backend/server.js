@@ -623,16 +623,30 @@ function safeJson(str) {
 // ---------------------------------------------------------------------------
 // Catch-all reverse proxy -> code-server (127.0.0.1:8080)
 // ---------------------------------------------------------------------------
+// NOTE: http-proxy-middleware v3 moved all event handlers under the `on`
+// key (onError/onProxyReq/etc. from v2 are silently ignored in v3, which is
+// why proxy failures used to fall through to the library's generic default
+// "Error occurred while trying to proxy: <url>" text instead of our handler).
 const codeServerProxy = createProxyMiddleware({
   target: CODE_SERVER_TARGET,
   changeOrigin: true,
   ws: true, // WebSocket support — critical for code-server terminal/editor sync
   logLevel: 'warn',
-  onError: (err, req, res) => {
-    console.error('Proxy error:', err.message);
-    if (res && !res.headersSent && typeof res.status === 'function') {
-      res.status(502).json({ error: 'code-server proxy error', detail: err.message });
-    }
+  on: {
+    error: (err, req, res) => {
+      console.error('Proxy error (code-server unreachable):', err.message);
+      if (res && typeof res.writeHead === 'function' && !res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(
+          '<html><body style="font-family:sans-serif;padding:2rem">' +
+          '<h2>code-server is still starting…</h2>' +
+          '<p>The editor backend isn\'t reachable yet. This is normal right after a ' +
+          'cold start/deploy — refresh in a few seconds.</p>' +
+          '<pre>' + String(err && err.message).replace(/</g, '&lt;') + '</pre>' +
+          '</body></html>'
+        );
+      }
+    },
   },
 });
 
