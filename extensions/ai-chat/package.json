@@ -1,0 +1,66 @@
+{
+  "name": "ai-chat",
+  "displayName": "AI Chat",
+  "description": "An AI coding assistant chat panel powered by Gemini/Gemma.",
+  "version": "0.0.1",
+  "publisher": "codeserver-ai",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Machine Learning", "Programming Languages"],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:aiChatView"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ai-chat-container",
+          "title": "AI Chat",
+          "icon": "media/chat-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ai-chat-container": [
+        {
+          "id": "aiChatView",
+          "name": "AI Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aiChat.focus",
+        "title": "AI Chat: Focus"
+      },
+      {
+        "command": "aiChat.newChat",
+        "title": "AI Chat: New Chat"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "aiChat.newChat",
+          "when": "view == aiChatView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-yarn -o ai-chat-0.0.1.vsix",
+    "pretest": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,0 +1,27 @@
+# =============================================================================
+# Render Blueprint spec for codeserver-ai
+# Deploy via Render Dashboard → New → Blueprint → point at this repo.
+# =============================================================================
+services:
+  - type: web
+    name: codeserver-ai
+    env: docker
+    region: oregon        # adjust as needed
+    plan: standard        # code-server + Node backend; upgrade to higher tiers for heavier dev work
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # --- Secrets (set manually in Render dashboard) ---
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_SANDBOX_REPO
+        sync: false
+
+      # --- Non-secret defaults ---
+      - key: GEMINI_MODEL
+        value: gemma-4-31b-it
+      - key: CODESPACE_MACHINE_TYPE
+        value: largePremiumLinux
