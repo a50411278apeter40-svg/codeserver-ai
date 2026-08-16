@@ -1,5 +1,14 @@
 import * as vscode from 'vscode';
 
+function getNonce(): string {
+    let text = '';
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+}
+
 /**
  * AI Chat — VS Code / code-server extension.
  *
@@ -39,6 +48,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
     // override via the chatBackendOrigin setting if the backend is hosted
     // elsewhere.
     const chatEndpoint = BACKEND_PATH;
+    const nonce = getNonce();
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -46,6 +56,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Chat</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} https: data:; font-src ${webview.cspSource}; connect-src https: http://localhost:* http://127.0.0.1:*; script-src 'nonce-${nonce}';" />
   <style>
     :root {
       --bubble-user: var(--vscode-button-background, #0e639c);
@@ -189,7 +200,7 @@ function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): s
     </div>
   </div>
 
-  <script>
+  <script nonce="${nonce}">
     (function () {
       const vscodeApi = acquireVsCodeApi();
       const messagesEl = document.getElementById('messages');
