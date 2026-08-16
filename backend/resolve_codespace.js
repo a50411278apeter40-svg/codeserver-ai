@@ -80,8 +80,17 @@ async function main() {
     log(`Created codespace: ${name}`);
   }
 
-  log(`Ensuring "${name}" is Available (this can take up to ~90s on first boot) …`);
-  await ensureCodespaceRunning(name, { maxRetries: 24, retryDelayMs: 5000 });
+  // First-time provisioning of a brand-new codespace (installing the
+  // devcontainer's features — node, python, github-cli — into the
+  // universal:2 base image), or resuming one that's still mid-provisioning
+  // from a previous run, can genuinely take several minutes, not seconds.
+  // Waking an already-Available/Shutdown codespace back up returns almost
+  // immediately regardless, so a generous budget here costs nothing on the
+  // fast path — only actually waits this long when provisioning really is
+  // still in progress.
+  const maxRetries = 90; // 90 * 5s = 450s (~7.5 min)
+  log(`Ensuring "${name}" is Available (up to ~${maxRetries * 5}s budget) …`);
+  await ensureCodespaceRunning(name, { maxRetries, retryDelayMs: 5000 });
   log(`"${name}" is Available.`);
 
   // ONLY this goes to stdout.

@@ -144,7 +144,7 @@ echo "[start.sh] code-server (+ codespace wiring) PID: ${CODE_SERVER_PID} (logs:
 # Small watcher, purely informational — logs when code-server becomes
 # reachable (or if it dies), but never blocks the backend from starting.
 (
-  for i in $(seq 1 180); do
+  for i in $(seq 1 500); do
     if curl -fsS -o /dev/null "http://127.0.0.1:8080/" 2>/dev/null; then
       echo "[start.sh] code-server became reachable after ~${i}s."
       exit 0
@@ -155,7 +155,7 @@ echo "[start.sh] code-server (+ codespace wiring) PID: ${CODE_SERVER_PID} (logs:
     fi
     sleep 1
   done
-  echo "[start.sh] code-server still not reachable after 180s — check /tmp/code-server.log"
+  echo "[start.sh] code-server still not reachable after 500s — check /tmp/code-server.log"
 ) &
 
 echo "[start.sh] Starting Node backend on :${PORT:-10000} (foreground/main process) …"
