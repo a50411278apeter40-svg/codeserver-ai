@@ -33,6 +33,9 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const CODE_SERVER_TARGET = process.env.CODE_SERVER_TARGET || 'http://127.0.0.1:8080';
 
+// Tracks the keepalive self-ping loop's status for /api/health visibility.
+const keepaliveState = { lastPingAt: null, lastStatus: null, count: 0 };
+
 // ---------------------------------------------------------------------------
 // Config / env
 // ---------------------------------------------------------------------------
@@ -145,6 +148,7 @@ app.get('/api/health', (_req, res) => {
     code_server_target: CODE_SERVER_TARGET,
     tool_count: toolDeclarations.length,
     max_tool_calls: MAX_TOOL_CALLS,
+    keepalive: keepaliveState,
   });
 });
 
@@ -745,10 +749,16 @@ const KEEPALIVE_URL = process.env.RENDER_EXTERNAL_URL || 'https://vscodeai.onren
 function selfPing() {
   const target = `${KEEPALIVE_URL.replace(/\/$/, '')}/api/health`;
   const req = https.request(target, { method: 'HEAD', timeout: 10000 }, (res) => {
+    keepaliveState.lastPingAt = new Date().toISOString();
+    keepaliveState.lastStatus = res.statusCode;
+    keepaliveState.count += 1;
     console.log(`[keepalive] HEAD ${target} -> ${res.statusCode}`);
     res.resume();
   });
   req.on('error', (err) => {
+    keepaliveState.lastPingAt = new Date().toISOString();
+    keepaliveState.lastStatus = `error: ${err.message}`;
+    keepaliveState.count += 1;
     console.log(`[keepalive] HEAD ${target} failed: ${err.message}`);
   });
   req.on('timeout', () => req.destroy());
