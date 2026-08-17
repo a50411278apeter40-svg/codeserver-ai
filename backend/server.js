@@ -644,7 +644,8 @@ app.get('/api/debug/logs', (_req, res) => {
     .join('\n') || '(no matching env vars)';
 
   res.type('text/plain').send(
-    '=== /tmp/code-server.log (tail) ===\n' + tail('/tmp/code-server.log', 20000) +
+    '=== /tmp/ulimit.log ===\n' + tail('/tmp/ulimit.log', 2000) +
+    '\n\n=== /tmp/code-server.log (tail) ===\n' + tail('/tmp/code-server.log', 20000) +
     '\n\n=== /tmp/gh_ssh_config.log ===\n' + tail('/tmp/gh_ssh_config.log', 5000) +
     '\n\n=== /tmp/sshfs.log ===\n' + tail('/tmp/sshfs.log', 5000) +
     '\n\n=== /root/.ssh/config ===\n' + tail('/root/.ssh/config', 5000) +

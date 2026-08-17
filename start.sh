@@ -25,8 +25,15 @@ set -e
 # (often 1024 or lower on Render) gets exhausted fast, which is why the logs
 # were full of "EMFILE: too many open files" warnings. Best-effort — some
 # sandboxes cap how high this can go, hence `|| true`.
-ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
-echo "[start.sh] File descriptor limit: $(ulimit -n)"
+{
+  echo "[start.sh] FD limits BEFORE: soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
+  # Try to raise the SOFT limit as close to the HARD ceiling as this
+  # container allows (the hard ceiling is set by Render's host/cgroup and we
+  # can't exceed it from inside — ulimit -n alone silently no-ops past it).
+  ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
+  echo "[start.sh] FD limits AFTER:  soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
+} > /tmp/ulimit.log 2>&1
+cat /tmp/ulimit.log
 
 WORKSPACE_FOLDER="/home/coder/project"
 mkdir -p "$WORKSPACE_FOLDER"
@@ -102,7 +109,17 @@ mkdir -p "$WORKSPACE_FOLDER"
     },
     "bash (local render container)": { "path": "bash" }
   },
-  "terminal.integrated.enablePersistentSessions": false
+  "terminal.integrated.enablePersistentSessions": false,
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/node_modules/**": true,
+    "**/.rsync-partial/**": true,
+    "/home/coder/project/**": true,
+    "/root/.local/share/code-server/extensions/**": true,
+    "/root/.local/share/code-server/Machine/**": true,
+    "/root/.cache/**": true
+  },
+  "search.followSymlinks": false
 }
 SETTINGSEOF
         # enablePersistentSessions:false matters more than the default
