@@ -24,6 +24,7 @@
 
 const express = require('express');
 const httpProxy = require('http-proxy');
+const https = require('https');
 
 // Tool-using agent: declarations + dispatcher (exec via codespace bridge)
 const { toolDeclarations, dispatchTool } = require('./tools');
@@ -728,6 +729,36 @@ server.keepAliveTimeout = 0;
 server.on('upgrade', (req, socket, head) => {
   codeServerProxy.ws(req, socket, head);
 });
+
+// ---------------------------------------------------------------------------
+// Keepalive self-ping
+// ---------------------------------------------------------------------------
+// Render's free/starter web services spin down after a period with no
+// INBOUND public HTTP traffic. Pinging localhost from inside the process
+// doesn't count — Render only tracks requests that actually arrive over the
+// public internet at the service's external URL. So this sends a real HEAD
+// request to our own public URL every 3 minutes, which Render sees as
+// legitimate traffic and keeps the instance awake.
+const KEEPALIVE_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+const KEEPALIVE_URL = process.env.RENDER_EXTERNAL_URL || 'https://vscodeai.onrender.com';
+
+function selfPing() {
+  const target = `${KEEPALIVE_URL.replace(/\/$/, '')}/api/health`;
+  const req = https.request(target, { method: 'HEAD', timeout: 10000 }, (res) => {
+    console.log(`[keepalive] HEAD ${target} -> ${res.statusCode}`);
+    res.resume();
+  });
+  req.on('error', (err) => {
+    console.log(`[keepalive] HEAD ${target} failed: ${err.message}`);
+  });
+  req.on('timeout', () => req.destroy());
+  req.end();
+}
+
+setInterval(selfPing, KEEPALIVE_INTERVAL_MS);
+// Fire one shortly after boot too, so we don't wait a full 3 minutes for
+// the first proof-of-life ping in the logs.
+setTimeout(selfPing, 15000);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
