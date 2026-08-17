@@ -84,10 +84,21 @@ mkdir -p "$WORKSPACE_FOLDER"
       "args": ["${CS_HOST}", "-t", "cd ${REMOTE_PATH} 2>/dev/null; exec bash -l"]
     },
     "bash (local render container)": { "path": "bash" }
-  }
+  },
+  "terminal.integrated.enablePersistentSessions": false
 }
 SETTINGSEOF
-        echo "[start.sh] Integrated terminal wired to SSH into ${CS_HOST} (${REMOTE_PATH})."
+        # enablePersistentSessions:false matters more than the default
+        # profile above: without it, VS Code Web tries to RESTORE whatever
+        # terminal the browser last had open (replaying that terminal's
+        # exact original launch command from browser-side storage) on every
+        # reconnect/reload — completely bypassing the default profile we
+        # just set, since restore != "open a new terminal". Any terminal
+        # opened before this fix shipped was recorded as plain local bash,
+        # so it kept coming back as local bash forever. Disabling
+        # persistence forces every reconnect to spawn a genuinely fresh
+        # terminal, which is the only case where "default profile" applies.
+        echo "[start.sh] Integrated terminal wired to SSH into ${CS_HOST} (${REMOTE_PATH}); persistent session restore disabled so it always reconnects fresh via that profile."
 
         # --- Filesystem integration ------------------------------------------
         # Try a real live SSHFS mount first (requires /dev/fuse — most PaaS
