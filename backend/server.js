@@ -25,6 +25,8 @@
 const express = require('express');
 const httpProxy = require('http-proxy');
 const https = require('https');
+const zlib = require('zlib');
+const compression = require('compression');
 
 // Tool-using agent: declarations + dispatcher (exec via codespace bridge)
 const { toolDeclarations, dispatchTool } = require('./tools');
@@ -54,6 +56,82 @@ const MAX_TOOL_CALLS = parseInt(process.env.MAX_TOOL_CALLS || '8', 10);
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Gzip compression (both directions), to cut bandwidth on Render's metered
+// network and stay well under request/bandwidth limits.
+//
+// OUTGOING (server -> client): `compression` gzips any response whose
+// Content-Type is compressible AND whose request sent `Accept-Encoding: gzip`
+// (virtually all browsers). This also transparently compresses the reverse-
+// proxied code-server HTTP traffic (its JS/CSS/HTML bundles) below, because
+// http-proxy's `.web()` pipes the upstream response through this same `res`
+// object — the compression middleware has already monkey-patched
+// res.write/res.end by the time that happens, so it gzips those bytes too.
+//
+// EXCLUDED: /api/chat (SSE stream) — gzip needs to buffer bytes to build its
+// compression window, which would add latency / break the token-by-token
+// streaming feel of the AI chat. Also excluded: anything already compressed
+// (images, fonts, etc — `compression`'s default filter already skips these
+// via its content-type based `compressible` check) and WebSocket upgrades
+// (upgrades never go through Express's HTTP response pipeline at all, so
+// this middleware doesn't apply to them — WS compression is negotiated
+// separately below via permessage-deflate passthrough).
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (req.path === '/api/chat') return false;
+      return compression.filter(req, res);
+    },
+  })
+);
+
+// INCOMING (client -> server): transparently gunzip request bodies that
+// arrive with `Content-Encoding: gzip` or `deflate`, BEFORE express.json()
+// parses them. Most clients don't compress small JSON request bodies, but
+// this makes it work if the extension webview (or anything else) starts
+// sending compressed request bodies to save upload bandwidth.
+app.use((req, res, next) => {
+  const enc = (req.headers['content-encoding'] || '').toLowerCase();
+  if (enc !== 'gzip' && enc !== 'deflate') return next();
+
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    const compressed = Buffer.concat(chunks);
+    const decompress = enc === 'gzip' ? zlib.gunzip : zlib.inflate;
+    decompress(compressed, (err, decoded) => {
+      if (err) {
+        console.error('Failed to decompress request body:', err.message);
+        return res.status(400).json({ error: 'Invalid ' + enc + ' request body' });
+      }
+      // Replace the stream with the decoded body so express.json() (which
+      // reads req the normal streaming way) sees plain bytes. Simplest way:
+      // stash it and let a tiny custom parser below read it directly.
+      req._decodedBody = decoded;
+      delete req.headers['content-encoding'];
+      req.headers['content-length'] = String(decoded.length);
+      next();
+    });
+  });
+});
+
+// If we already decoded a gzip/deflate body above, feed it to express.json's
+// underlying parser via a fake readable instead of re-reading req (which has
+// already fully drained). Otherwise fall through to the normal body parser.
+app.use((req, res, next) => {
+  if (!req._decodedBody) return next();
+  const { Readable } = require('stream');
+  const fakeReq = Readable.from([req._decodedBody]);
+  fakeReq.headers = req.headers;
+  fakeReq.method = req.method;
+  fakeReq.url = req.url;
+  express.json({ limit: '2mb' })(fakeReq, res, (err) => {
+    if (err) return next(err);
+    req.body = fakeReq.body;
+    next();
+  });
+});
+
 app.use(express.json({ limit: '2mb' }));
 
 // Simple request logging
@@ -532,12 +610,48 @@ app.get('/api/debug/logs', (_req, res) => {
       return `<could not read ${path}: ${e.message}>`;
     }
   }
+  // Grep product.json for webview-related keys, and dump env vars that
+  // could cause code-server to think it's running inside GitHub Codespaces
+  // (which would make it use the app.github.dev webview/port-forwarding
+  // domain scheme instead of self-hosting webviews on our own origin).
+  function grepFile(path, pattern) {
+    try {
+      const content = fs.readFileSync(path, 'utf8');
+      const re = new RegExp(pattern, 'i');
+      return content.split('\n').filter((l) => re.test(l)).join('\n') || '(no matches)';
+    } catch (e) {
+      return `<could not read ${path}: ${e.message}>`;
+    }
+  }
+  function findProductJson() {
+    const candidates = [
+      '/usr/lib/code-server/lib/vscode/product.json',
+      '/usr/lib/code-server/out/vs/product.json',
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) return c;
+    }
+    try {
+      const { execSync } = require('child_process');
+      const found = execSync('find / -maxdepth 6 -iname product.json 2>/dev/null | head -5').toString().trim();
+      return found.split('\n')[0] || null;
+    } catch (_) { return null; }
+  }
+  const productJsonPath = findProductJson();
+  const envDump = Object.keys(process.env)
+    .filter((k) => /CODESPACE|GITHUB|VSCODE|WEBVIEW|PROXY|RENDER_EXTERNAL/i.test(k))
+    .map((k) => `${k}=${process.env[k]}`)
+    .join('\n') || '(no matching env vars)';
+
   res.type('text/plain').send(
     '=== /tmp/code-server.log (tail) ===\n' + tail('/tmp/code-server.log', 20000) +
     '\n\n=== /tmp/gh_ssh_config.log ===\n' + tail('/tmp/gh_ssh_config.log', 5000) +
     '\n\n=== /tmp/sshfs.log ===\n' + tail('/tmp/sshfs.log', 5000) +
     '\n\n=== /root/.ssh/config ===\n' + tail('/root/.ssh/config', 5000) +
-    '\n\n=== /root/.local/share/code-server/User/settings.json ===\n' + tail('/root/.local/share/code-server/User/settings.json', 3000)
+    '\n\n=== /root/.local/share/code-server/User/settings.json ===\n' + tail('/root/.local/share/code-server/User/settings.json', 3000) +
+    '\n\n=== env vars (CODESPACE|GITHUB|VSCODE|WEBVIEW|PROXY|RENDER_EXTERNAL) ===\n' + envDump +
+    '\n\n=== product.json path ===\n' + String(productJsonPath) +
+    '\n\n=== product.json webview* / proxy* keys ===\n' + (productJsonPath ? grepFile(productJsonPath, 'webview|proxy|cdn|Endpoint') : '(product.json not found)')
   );
 });
 
@@ -730,6 +844,18 @@ server.keepAliveTimeout = 0;
 
 // Exactly ONE explicit 'upgrade' listener — forwards WebSocket upgrades
 // (terminal, editor sync, extension host, etc.) to code-server.
+//
+// WS COMPRESSION: we deliberately do NOT pass a custom `headers` option to
+// codeServerProxy.ws() here. http-proxy's ws proxying forwards the client's
+// original upgrade headers (including `Sec-WebSocket-Extensions:
+// permessage-deflate`, sent automatically by every modern browser) to
+// code-server byte-for-byte. code-server's own `ws` server negotiates
+// permessage-deflate on its end, so both directions of every proxied
+// WebSocket (terminal I/O, editor/document sync, extension host RPC) are
+// already gzip/deflate-compressed on the wire without us touching a single
+// byte in the middle — touching the frames here would require fully
+// decoding the WS protocol, which isn't worth the risk of breaking VS
+// Code's reconnection logic.
 server.on('upgrade', (req, socket, head) => {
   codeServerProxy.ws(req, socket, head);
 });
